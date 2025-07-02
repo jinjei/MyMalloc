@@ -74,14 +74,14 @@ static inline bool verify_freelist();
 static inline header * verify_chunk(header * chunk);
 static inline bool verify_tags();
 
+// My own helper functions
+static int get_freelist_index(size_t size);
+static void remove_node(header * node);
+static void insert_node(header * hdr);
+
 static void init();
 
 static bool isMallocInitialized;
-
-//my own helper functions
-static size_t get_freelist_index(size_t size);
-static void insert_node(header *hdr);
-static void remove_node(header *node);
 
 /**
  * @brief Helper function to retrieve a header pointer from a pointer and an 
@@ -93,7 +93,7 @@ static void remove_node(header *node);
  * @return a pointer to a header offset bytes from pointer
  */
 static inline header * get_header_from_offset(void * ptr, ptrdiff_t off) {
-  return (header *)((char *) ptr + off);
+	return (header *)((char *) ptr + off);
 }
 
 /**
@@ -104,7 +104,7 @@ static inline header * get_header_from_offset(void * ptr, ptrdiff_t off) {
  * @return header to the right of h
  */
 header * get_right_header(header * h) {
-  return get_header_from_offset(h, get_size(h));
+	return get_header_from_offset(h, get_size(h));
 }
 
 /**
@@ -126,9 +126,9 @@ inline static header * get_left_header(header * h) {
  * @param left_size the size of the object to the left of the fencepost
  */
 inline static void initialize_fencepost(header * fp, size_t left_size) {
-  set_state(fp,FENCEPOST);
-  set_size(fp, ALLOC_HEADER_SIZE);
-  fp->left_size = left_size;
+	set_state(fp,FENCEPOST);
+	set_size(fp, ALLOC_HEADER_SIZE);
+	fp->left_size = left_size;
 }
 
 /**
@@ -170,7 +170,7 @@ inline static void insert_fenceposts(void * raw_mem, size_t size) {
  * @param size The size to allocate from the OS
  *
  * @return A pointer to the allocable block in the chunk (just after the 
- * first fencepost)
+ * first fencpost)
  */
 static header * allocate_chunk(size_t size) {
   void * mem = sbrk(size);
@@ -183,7 +183,6 @@ static header * allocate_chunk(size_t size) {
   return hdr;
 }
 
-
 /**
  * @brief Helper allocate an object given a raw request size from the user
  *
@@ -191,21 +190,20 @@ static header * allocate_chunk(size_t size) {
  *
  * @return A block satisfying the user's request
  */
- static inline header * allocate_object(size_t raw_size) {
+static inline header * allocate_object(size_t raw_size) {
   if (raw_size == 0) return NULL;
-  
-  size_t min_size = 16;
-  if (raw_size < min_size) {
-      raw_size = min_size;
-  }
-  // Calculate total size needed including header
-  raw_size += ALLOC_HEADER_SIZE;
+
   raw_size = (raw_size + 7) & (~7);  // Round up to multiple of 8
   
   
-  size_t allocable_size = raw_size - ALLOC_HEADER_SIZE;
+  //minimum actual size(requested+metadata) = full header struct(32 bytes)
+  size_t total_size = raw_size + ALLOC_HEADER_SIZE;
+  if(total_size < sizeof(header)) {
+    total_size = sizeof(header);
+  }
   
-  int index = get_freelist_index(raw_size);
+  
+  int index = get_freelist_index(total_size);
   
   header *current = NULL;
   header *freelist = NULL;
@@ -222,10 +220,10 @@ static header * allocate_chunk(size_t size) {
           break;
         } 
         
-      } else { //if in last freelist, check if there is a block larger than raw_size
+      } else { //if in last freelist, check if there is a block larger than total_size
         current = freelist->next;
         for( current; current != freelist; current = current->next) {
-            if(get_size(current) >= raw_size) {
+            if(get_size(current) >= total_size) {
                 foundBlock = true;
                 break;
             }
@@ -235,28 +233,28 @@ static header * allocate_chunk(size_t size) {
   }
 
   if(foundBlock) { //have memory to allocate
-      if(get_size(current) == raw_size || get_size(current) - raw_size < sizeof(header)) {
+      size_t remain_size = get_size(current) - total_size;
+      if(remain_size < sizeof(header)) {
           remove_node(current);
           set_state(current, ALLOCATED);
-          return (header*)current->data;
+          return (header *) current->data;
       } else {  //remainder is large enough, need split
         size_t curIndex = get_freelist_index(get_size(current));
-        size_t remainSize = get_size(current) - raw_size;
-        size_t remainIndex = get_freelist_index(remainSize);
-        header *higher_memptr = get_header_from_offset(current, remainSize);
-        set_size_and_state(higher_memptr, raw_size, ALLOCATED);
-        higher_memptr->left_size = remainSize;
+        size_t remainIndex = get_freelist_index(remain_size);
+        header *higher_memptr = get_header_from_offset(current, remain_size);
+        set_size_and_state(higher_memptr, total_size, ALLOCATED);
+        higher_memptr->left_size = remain_size;
 
-        set_size_and_state(current, remainSize, UNALLOCATED);
+        set_size_and_state(current, remain_size, UNALLOCATED);
         if(curIndex != remainIndex) {
             remove_node(current);
             insert_node(current);
         }
 
         header *right_free_obj = get_right_header(higher_memptr);
-        right_free_obj->left_size = raw_size;
+        right_free_obj->left_size = total_size;
 
-        return (header *)higher_memptr->data;
+        return (header *) higher_memptr->data;
       }
   }
   
@@ -291,142 +289,121 @@ static header * allocate_chunk(size_t size) {
           right_fence->left_size = get_size(new_chunk);
           lastFencePost = right_fence;
       }
-      return allocate_object(allocable_size);
+      return allocate_object(raw_size);
   }
 
 }
 
-
-
 /**
-* @brief Helper to get the header from a pointer allocated with malloc
-*
-* @param p pointer to the data region of the block
-*
-* @return A pointer to the header of the block
-*/
+ * @brief Helper to get the header from a pointer allocated with malloc
+ *
+ * @param p pointer to the data region of the block
+ *
+ * @return A pointer to the header of the block
+ */
 static inline header * ptr_to_header(void * p) {
-return (header *)((char *) p - ALLOC_HEADER_SIZE); //sizeof(header));
+  return (header *)((char *) p - ALLOC_HEADER_SIZE); //sizeof(header));
 }
 
 /**
-* @brief Helper to manage deallocation of a pointer returned by the user
-*
-* @param p The pointer returned to the user by a call to malloc
-*/
-static inline void deallocate_object(void *p) {
-  if (p == NULL) return;           
-  
-  header *block = ptr_to_header(p);
-  size_t cur_size = get_size(block);
+ * @brief Helper to manage deallocation of a pointer returned by the user
+ *
+ * @param p The pointer returned to the user by a call to malloc
+ */
+static inline void deallocate_object(void * p) {
+  if(p == NULL)
+    return;
 
-  if (get_state(block) == UNALLOCATED) {
-    puts("Double Free Detected");
-    #line 577
-    assert(false);
+  header *current_block = ptr_to_header(p);
+
+  if(get_state(current_block) == UNALLOCATED){
+    //double free
+    fprintf(stderr, "Double Free Detected\ntest_double_free: ../myMalloc.c:577: deallocate_object: Assertion `false' failed.\n");
+    _exit(1);
   }
   
-  set_state(block, UNALLOCATED);
+  size_t current_size = get_size(current_block);
+  set_state(current_block, UNALLOCATED);
 
-  header *right = get_right_header(block);
-  size_t right_size = get_size(right);
-  enum state right_state = get_state(right);
+  header *left_block = get_left_header(current_block);
+  enum state left_state = get_state(left_block);
+  size_t leftBlock_size = get_size(left_block);
 
-  header *left = get_left_header(block);
-  size_t left_size = get_size(left);
-  enum state left_state = get_state(left);
+  header *right_block = get_right_header(current_block);
+  enum state right_state = get_state(right_block);
+  size_t rightBlock_size = get_size(right_block);
 
-  header *newBlock;
+  if(left_state != UNALLOCATED && right_state != UNALLOCATED) {
+    //simply insert current_block into appropriate freelist
+    right_block->left_size = current_size;
+    insert_node(current_block);
+  } else if(left_state == UNALLOCATED && right_state == UNALLOCATED) {
+    //coalesce with both neighbors
+    //Coalesced block should remain where the left block was in freelist
+    int left_idx = get_freelist_index(leftBlock_size);
+    set_size(left_block, leftBlock_size + current_size + rightBlock_size);
+    get_right_header(right_block)->left_size = get_size(left_block);
 
-  if (right_state == UNALLOCATED && left_state == UNALLOCATED) { //coalesce with both neighbors
-      size_t li = get_freelist_index(left_size);
-      size_t ri = get_freelist_index(right_size);
+    remove_node(right_block);
+    int new_idx = get_freelist_index(leftBlock_size);
+    //left_block was in last freelist, no operation needed
+    if(left_idx == N_LISTS-1 || new_idx == left_idx)
+      return;
 
-      newBlock = left;    //its left neighbor block is the beginning
-      set_size(left, left_size + cur_size + right_size);
-      get_right_header(right)->left_size = get_size(left);
+    //重新插
+    remove_node(left_block);
+    insert_node(left_block);
 
-      size_t newIndex = get_freelist_index(get_size(newBlock));
-
-      if(li == N_LISTS - 1) { //left is last freelist
-          remove_node(right);
-          return ;
-      } else if (ri == N_LISTS - 1) { //left primarily not in last freelist,
-                                      //right was in, the whole block will in last list after merge
-          remove_node(left);
-          left->prev = right->prev;
-          left->next = right->next;
-          right->prev->next = left;
-          right->next->prev = left;
-          return ;
-      } else if (ri != N_LISTS-1 && li != N_LISTS-1){ //both left and right not in the last freelist
-          remove_node(left);
-          remove_node(right);
-          insert_node(left);  //need re-insert the whole new block
-      }
-  } else if (left_state == UNALLOCATED) { //only left block is UNALLOCATED
-      size_t li = get_freelist_index(left_size);  
-      newBlock = left;                //left will be beginning
-      set_size(left, cur_size+left_size);
-
-      right->left_size = get_size(left);
-
-      if(li != N_LISTS - 1){
-          remove_node(left);
-          insert_node(newBlock);
-      } else
-          return ; //include the case of left in last freelist primarily
-
-  } else if (right_state == UNALLOCATED) {
-      size_t ri = get_freelist_index(right_size);
-      newBlock = block;             // cur block will be beginning
-      set_size(block, cur_size+right_size);
-      get_right_header(right)->left_size = get_size(block);
-
-      if(ri != N_LISTS - 1){
-          remove_node(right);
-          insert_node(newBlock);
-      } else
-          return ;
-
-  } else { //both left and right are allocated
-      newBlock = block;
-      right->left_size = get_size(block);
-      insert_node(newBlock);
+  } else if(right_state == UNALLOCATED) {
+    //only right_block is UNALLOCATED
+    int right_idx = get_freelist_index(rightBlock_size);
+    set_size(current_block, current_size + rightBlock_size);
+    get_right_header(right_block)->left_size = get_size(current_block);
+    
+    int new_idx = get_freelist_index(get_size(current_block));
+    if(new_idx != right_idx){
+      remove_node(right_block);
+      insert_node(current_block);
+    }
+  } else {
+    //only left_block is UNALLOCATED
+    int left_idx = get_freelist_index(leftBlock_size);
+    set_size(left_block, current_size + leftBlock_size);
+    right_block->left_size = get_size(left_block);
+    
+    int new_idx = get_freelist_index(get_size(left_block));
+    if(new_idx != left_idx){
+      remove_node(left_block);
+      insert_node(left_block);
+    }
   }
 
+  
 }
 
 
-
-// My own helper funtions
-static size_t get_freelist_index(size_t size) {
-  
-  size_t index = (size / 8) - 3;
-  
+// helper functions
+static int get_freelist_index(size_t size) {
+  int index = size / 8 - 3;
   if(index >= N_LISTS)
-    return N_LISTS - 1;
-  
+    index = N_LISTS - 1;
+
   return index;
 }
 
-
-static void insert_node(header *hdr) {
-  size_t index = get_freelist_index(get_size(hdr));
+static void insert_node(header * hdr) {
+  int index = get_freelist_index(get_size(hdr));
   header *freelist = &freelistSentinels[index];
-
-  hdr->prev = freelist;
   hdr->next = freelist->next;
+  hdr->prev = freelist;
   freelist->next->prev = hdr;
   freelist->next = hdr;
-
 }
 
 static void remove_node(header *node) {
-  node->prev->next = node->next;
   node->next->prev = node->prev;
+  node->prev->next = node->next;
 }
-
 
 /**
  * @brief Helper to detect cycles in the free list
@@ -500,21 +477,21 @@ static inline bool verify_freelist() {
  * @return a pointer to an invalid header or NULL if all header's are valid
  */
 static inline header * verify_chunk(header * chunk) {
-  if (get_state(chunk) != FENCEPOST) {
-    fprintf(stderr, "Invalid fencepost\n");
-    print_object(chunk);
-    return chunk;
-  }
-  
-  for (; get_state(chunk) != FENCEPOST; chunk = get_right_header(chunk)) {
-    if (get_size(chunk)  != get_right_header(chunk)->left_size) {
-      fprintf(stderr, "Invalid sizes\n");
-      print_object(chunk);
-      return chunk;
-    }
-  }
-  
-  return NULL;
+	if (get_state(chunk) != FENCEPOST) {
+		fprintf(stderr, "Invalid fencepost\n");
+		print_object(chunk);
+		return chunk;
+	}
+	
+	for (; get_state(chunk) != FENCEPOST; chunk = get_right_header(chunk)) {
+		if (get_size(chunk)  != get_right_header(chunk)->left_size) {
+			fprintf(stderr, "Invalid sizes\n");
+			print_object(chunk);
+			return chunk;
+		}
+	}
+	
+	return NULL;
 }
 
 /**
@@ -610,7 +587,7 @@ bool verify() {
  * @param block The block to print
  */
 void basic_print(header * block) {
-  printf("[%zd] -> ", get_size(block));
+	printf("[%zd] -> ", get_size(block));
 }
 
 /**
@@ -619,7 +596,7 @@ void basic_print(header * block) {
  * @param block The block to print
  */
 void print_list(header * block) {
-  printf("[%zd]\n", get_size(block));
+	printf("[%zd]\n", get_size(block));
 }
 
 /**
